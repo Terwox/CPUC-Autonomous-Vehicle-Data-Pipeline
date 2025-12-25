@@ -1,0 +1,9 @@
+# This directory contains cleaned, standardized parquet files
+#
+# Output files:
+# - trips.parquet: All trip-level data with unified schema
+# - monthly_summary.parquet: Month-level aggregates
+# - vmt_by_period.parquet: VMT broken out by P0/P1/P2/P3
+# - incidents.parquet: Incidents and complaints
+# - tract_pickups.parquet: Census tract pickup locations
+# - metadata.json: Schema docs, source URLs, processing notes

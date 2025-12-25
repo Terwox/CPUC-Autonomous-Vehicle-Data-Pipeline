@@ -1,0 +1,3 @@
+# This directory contains original downloaded CPUC Excel files
+# Files are named: {company}_{quarter}_{report_type}.xlsx
+# Example: waymo_2024q1_trip-level.xlsx

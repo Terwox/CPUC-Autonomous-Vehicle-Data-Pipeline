@@ -1,0 +1,22 @@
+# Core dependencies
+pandas>=2.0.0
+openpyxl>=3.1.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+pyarrow>=14.0.0
+lxml>=4.9.0
+
+# Optional performance improvement
+polars>=0.20.0
+
+# Development and exploration
+jupyter>=1.0.0
+notebook>=7.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Testing and validation
+pytest>=7.4.0
+
+# Type hints
+typing-extensions>=4.8.0
