@@ -3,7 +3,8 @@
 CPUC Autonomous Vehicle Data Downloader
 
 This script scrapes the CPUC quarterly reporting page to find and download
-all available Excel files containing autonomous vehicle operational data.
+all available ZIP archives containing autonomous vehicle operational data,
+then extracts the Excel files.
 
 Usage:
     python scripts/download.py [--output-dir RAW_DIR] [--metadata-file METADATA_PATH]
@@ -17,7 +18,9 @@ import os
 import re
 import sys
 import time
+import zipfile
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin, urlparse
@@ -42,24 +45,10 @@ CPUC_REPORTING_URL = (
 )
 
 # Known companies in the AV program
-KNOWN_COMPANIES = ["waymo", "cruise", "zoox", "aurora", "nuro"]
-
-# Report types based on CPUC file naming conventions
-REPORT_TYPES = [
-    "trip-level",
-    "month-level",
-    "monthly-tract",
-    "incidents-complaints",
-    "incidents-location",
-    "vmt",
-]
-
-# Permit types
-PERMIT_TYPES = [
-    "drivered-pilot",
-    "driverless-pilot",
-    "drivered-deployment",
-    "driverless-deployment",
+KNOWN_COMPANIES = [
+    "waymo", "cruise", "zoox", "aurora", "nuro", "autox",
+    "pony", "argo", "motional", "ghost", "deeproute", "voyage",
+    "weride", "tensor"
 ]
 
 
@@ -92,20 +81,10 @@ def fetch_with_retry(
 ) -> Optional[requests.Response]:
     """
     Fetch a URL with exponential backoff retry logic.
-
-    Args:
-        session: requests Session object
-        url: URL to fetch
-        max_retries: Maximum number of retry attempts
-        base_delay: Base delay in seconds (doubles each retry)
-        stream: Whether to stream the response
-
-    Returns:
-        Response object or None if all retries failed
     """
     for attempt in range(max_retries + 1):
         try:
-            response = session.get(url, timeout=30, stream=stream)
+            response = session.get(url, timeout=60, stream=stream)
             response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
@@ -122,166 +101,86 @@ def fetch_with_retry(
     return None
 
 
-def parse_filename_metadata(url: str, link_text: str) -> dict:
+def parse_zip_metadata(url: str, link_text: str) -> dict:
     """
-    Extract metadata from a download URL and link text.
-
-    Args:
-        url: The download URL
-        link_text: The text of the link element
-
-    Returns:
-        Dictionary with extracted metadata
+    Extract metadata from a ZIP download URL and link text.
     """
     metadata = {
         "original_url": url,
         "original_link_text": link_text,
-        "company": None,
-        "quarter": None,
+        "program_type": None,  # deployment or pilot
         "year": None,
-        "report_type": None,
-        "permit_type": None,
+        "quarter": None,
+        "start_month": None,
+        "end_month": None,
+        "companies": [],
     }
 
-    # Normalize for matching
     url_lower = url.lower()
     text_lower = link_text.lower()
     combined = f"{url_lower} {text_lower}"
 
-    # Extract company
+    # Detect program type
+    if "deployment" in combined:
+        metadata["program_type"] = "deployment"
+    elif "pilot" in combined:
+        metadata["program_type"] = "pilot"
+
+    # Extract year
+    year_match = re.search(r"20(1[89]|2[0-9])", combined)
+    if year_match:
+        metadata["year"] = int(f"20{year_match.group(1)}")
+
+    # Extract quarter (Q1, Q2, Q3, Q4)
+    quarter_match = re.search(r"q([1-4])", combined, re.IGNORECASE)
+    if quarter_match:
+        metadata["quarter"] = int(quarter_match.group(1))
+
+    # Extract month range patterns like "0601-0831" or "jun-aug"
+    month_range = re.search(r"(\d{2})01[-_](\d{2})\d{2}", url_lower)
+    if month_range:
+        metadata["start_month"] = int(month_range.group(1))
+        metadata["end_month"] = int(month_range.group(2))
+
+    # Extract companies from link text
     for company in KNOWN_COMPANIES:
         if company in combined:
-            metadata["company"] = company
-            break
-
-    # Extract quarter (Q1, Q2, Q3, Q4 or similar patterns)
-    quarter_patterns = [
-        r"q([1-4])",
-        r"quarter\s*([1-4])",
-        r"(\d{4})[-_]?q([1-4])",
-        r"q([1-4])[-_]?(\d{4})",
-    ]
-    for pattern in quarter_patterns:
-        match = re.search(pattern, combined, re.IGNORECASE)
-        if match:
-            groups = match.groups()
-            if len(groups) == 1:
-                metadata["quarter"] = int(groups[0])
-            elif len(groups) == 2:
-                # Determine which group is year vs quarter
-                if len(groups[0]) == 4:
-                    metadata["year"] = int(groups[0])
-                    metadata["quarter"] = int(groups[1])
-                else:
-                    metadata["quarter"] = int(groups[0])
-                    metadata["year"] = int(groups[1])
-            break
-
-    # Extract year if not already found
-    if metadata["year"] is None:
-        year_match = re.search(r"20(1[9]|2[0-9])", combined)
-        if year_match:
-            metadata["year"] = int(f"20{year_match.group(1)}")
-
-    # Extract report type
-    for report_type in REPORT_TYPES:
-        if report_type.replace("-", "").replace("_", "") in combined.replace(
-            "-", ""
-        ).replace("_", ""):
-            metadata["report_type"] = report_type
-            break
-
-    # Try alternate report type patterns
-    if metadata["report_type"] is None:
-        if "trip" in combined and "level" in combined:
-            metadata["report_type"] = "trip-level"
-        elif "month" in combined and "level" in combined:
-            metadata["report_type"] = "month-level"
-        elif "tract" in combined:
-            metadata["report_type"] = "monthly-tract"
-        elif "incident" in combined and "location" in combined:
-            metadata["report_type"] = "incidents-location"
-        elif "incident" in combined or "complaint" in combined:
-            metadata["report_type"] = "incidents-complaints"
-        elif "vmt" in combined:
-            metadata["report_type"] = "vmt"
-
-    # Extract permit type
-    for permit_type in PERMIT_TYPES:
-        if permit_type.replace("-", "") in combined.replace("-", "").replace("_", ""):
-            metadata["permit_type"] = permit_type
-            break
-
-    # Alternate permit type patterns
-    if metadata["permit_type"] is None:
-        if "driverless" in combined and "deployment" in combined:
-            metadata["permit_type"] = "driverless-deployment"
-        elif "drivered" in combined and "deployment" in combined:
-            metadata["permit_type"] = "drivered-deployment"
-        elif "driverless" in combined and "pilot" in combined:
-            metadata["permit_type"] = "driverless-pilot"
-        elif "drivered" in combined and "pilot" in combined:
-            metadata["permit_type"] = "drivered-pilot"
+            metadata["companies"].append(company)
 
     return metadata
 
 
-def generate_filename(metadata: dict, original_filename: str) -> str:
-    """
-    Generate a standardized filename based on metadata.
-
-    Format: {company}_{year}q{quarter}_{report_type}.xlsx
-
-    Args:
-        metadata: Extracted metadata dictionary
-        original_filename: Original filename from URL
-
-    Returns:
-        Standardized filename
-    """
+def generate_zip_filename(metadata: dict, original_url: str) -> str:
+    """Generate a standardized filename for downloaded ZIP."""
     parts = []
 
-    # Company
-    if metadata["company"]:
-        parts.append(metadata["company"])
+    # Program type
+    if metadata["program_type"]:
+        parts.append(metadata["program_type"])
     else:
         parts.append("unknown")
 
-    # Year and quarter
-    if metadata["year"] and metadata["quarter"]:
-        parts.append(f"{metadata['year']}q{metadata['quarter']}")
-    elif metadata["quarter"]:
+    # Year
+    if metadata["year"]:
+        parts.append(str(metadata["year"]))
+
+    # Quarter or month range
+    if metadata["quarter"]:
         parts.append(f"q{metadata['quarter']}")
-    else:
-        # Use a hash of the original URL for uniqueness
-        url_hash = hashlib.md5(metadata["original_url"].encode()).hexdigest()[:8]
+    elif metadata["start_month"] and metadata["end_month"]:
+        parts.append(f"m{metadata['start_month']:02d}-{metadata['end_month']:02d}")
+
+    # Use hash if we couldn't parse much
+    if len(parts) <= 1:
+        url_hash = hashlib.md5(original_url.encode()).hexdigest()[:8]
         parts.append(url_hash)
 
-    # Report type
-    if metadata["report_type"]:
-        parts.append(metadata["report_type"])
-
-    # Permit type (if available and different from default)
-    if metadata["permit_type"] and metadata["permit_type"] != "driverless-deployment":
-        parts.append(metadata["permit_type"])
-
-    # Get extension from original filename
-    ext = Path(original_filename).suffix.lower()
-    if ext not in [".xlsx", ".xls"]:
-        ext = ".xlsx"
-
-    return "_".join(parts) + ext
+    return "_".join(parts) + ".zip"
 
 
-def scrape_download_links(session: requests.Session) -> list[dict]:
+def scrape_zip_links(session: requests.Session) -> list[dict]:
     """
-    Scrape the CPUC quarterly reporting page for Excel file download links.
-
-    Args:
-        session: requests Session object
-
-    Returns:
-        List of dictionaries containing link info and metadata
+    Scrape the CPUC quarterly reporting page for ZIP file download links.
     """
     logger.info(f"Fetching CPUC quarterly reporting page: {CPUC_REPORTING_URL}")
 
@@ -292,86 +191,124 @@ def scrape_download_links(session: requests.Session) -> list[dict]:
 
     soup = BeautifulSoup(response.content, "lxml")
 
-    # Find all links to Excel files
-    excel_links = []
+    zip_links = []
+    seen_urls = set()
+
     for link in soup.find_all("a", href=True):
         href = link["href"]
         link_text = link.get_text(strip=True)
 
-        # Check if this is an Excel file link
-        if any(ext in href.lower() for ext in [".xlsx", ".xls"]):
+        # Check if this is a ZIP file link
+        if ".zip" in href.lower():
             # Make absolute URL if relative
             if not href.startswith("http"):
                 href = urljoin(CPUC_BASE_URL, href)
 
-            # Parse metadata from the link
-            metadata = parse_filename_metadata(href, link_text)
+            # Skip duplicates
+            if href in seen_urls:
+                continue
+            seen_urls.add(href)
 
-            # Get original filename from URL
-            parsed_url = urlparse(href)
-            original_filename = os.path.basename(parsed_url.path)
+            # Parse metadata
+            metadata = parse_zip_metadata(href, link_text)
 
             # Generate standardized filename
-            std_filename = generate_filename(metadata, original_filename)
+            std_filename = generate_zip_filename(metadata, href)
 
-            excel_links.append(
-                {
-                    "url": href,
-                    "link_text": link_text,
-                    "original_filename": original_filename,
-                    "standardized_filename": std_filename,
-                    "metadata": metadata,
-                }
-            )
+            zip_links.append({
+                "url": href,
+                "link_text": link_text,
+                "standardized_filename": std_filename,
+                "metadata": metadata,
+            })
 
-    logger.info(f"Found {len(excel_links)} Excel file links")
-    return excel_links
+    logger.info(f"Found {len(zip_links)} ZIP file links")
+    return zip_links
 
 
-def download_file(
-    session: requests.Session, url: str, output_path: Path
-) -> Optional[dict]:
+def download_and_extract_zip(
+    session: requests.Session,
+    url: str,
+    output_dir: Path,
+    zip_filename: str,
+    metadata: dict,
+) -> list[dict]:
     """
-    Download a file from URL to the specified path.
+    Download a ZIP file and extract Excel files from it.
 
-    Args:
-        session: requests Session object
-        url: URL to download from
-        output_path: Path to save the file
-
-    Returns:
-        Dictionary with download info or None if failed
+    Returns list of extracted file info.
     """
     logger.info(f"Downloading: {url}")
-    logger.info(f"  -> {output_path}")
 
-    response = fetch_with_retry(session, url, stream=True)
+    response = fetch_with_retry(session, url)
     if response is None:
-        return None
+        return []
 
-    # Get file size if available
-    total_size = int(response.headers.get("content-length", 0))
+    extracted_files = []
 
-    # Download and save
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # Open ZIP from memory
+        zip_buffer = BytesIO(response.content)
+        with zipfile.ZipFile(zip_buffer, 'r') as zf:
+            # List contents
+            file_list = zf.namelist()
+            excel_files = [f for f in file_list if f.lower().endswith(('.xlsx', '.xls'))]
 
-    downloaded_size = 0
-    hash_md5 = hashlib.md5()
+            logger.info(f"  ZIP contains {len(excel_files)} Excel files")
 
-    with open(output_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
-                downloaded_size += len(chunk)
-                hash_md5.update(chunk)
+            for excel_file in excel_files:
+                # Skip hidden files and temp files
+                basename = os.path.basename(excel_file)
+                if basename.startswith('.') or basename.startswith('~'):
+                    continue
 
-    return {
-        "path": str(output_path),
-        "size_bytes": downloaded_size,
-        "md5": hash_md5.hexdigest(),
-        "download_timestamp": datetime.now().isoformat(),
-        "content_type": response.headers.get("content-type"),
-    }
+                # Generate output filename with metadata prefix
+                prefix_parts = []
+                if metadata.get("program_type"):
+                    prefix_parts.append(metadata["program_type"])
+                if metadata.get("year"):
+                    prefix_parts.append(str(metadata["year"]))
+                if metadata.get("quarter"):
+                    prefix_parts.append(f"q{metadata['quarter']}")
+                elif metadata.get("start_month"):
+                    prefix_parts.append(f"m{metadata['start_month']:02d}")
+
+                # Clean up the original filename
+                clean_basename = re.sub(r'[^\w\-\.]', '_', basename)
+
+                if prefix_parts:
+                    output_filename = f"{'_'.join(prefix_parts)}_{clean_basename}"
+                else:
+                    output_filename = clean_basename
+
+                output_path = output_dir / output_filename
+
+                # Extract file
+                with zf.open(excel_file) as src:
+                    content = src.read()
+                    with open(output_path, 'wb') as dst:
+                        dst.write(content)
+
+                file_hash = hashlib.md5(content).hexdigest()
+
+                extracted_files.append({
+                    "original_name": excel_file,
+                    "output_name": output_filename,
+                    "output_path": str(output_path),
+                    "size_bytes": len(content),
+                    "md5": file_hash,
+                    "source_zip": url,
+                    "extracted_at": datetime.now().isoformat(),
+                })
+
+                logger.info(f"    Extracted: {output_filename}")
+
+    except zipfile.BadZipFile as e:
+        logger.error(f"  Invalid ZIP file: {e}")
+    except Exception as e:
+        logger.error(f"  Error extracting ZIP: {e}")
+
+    return extracted_files
 
 
 def load_metadata(metadata_path: Path) -> dict:
@@ -383,6 +320,7 @@ def load_metadata(metadata_path: Path) -> dict:
         "last_updated": None,
         "source_url": CPUC_REPORTING_URL,
         "files": {},
+        "zip_archives": {},
         "download_history": [],
     }
 
@@ -421,19 +359,20 @@ def main():
         help="Show what would be downloaded without actually downloading",
     )
     parser.add_argument(
-        "--filter-company",
-        type=str,
-        help="Only download files for specified company",
-    )
-    parser.add_argument(
-        "--filter-year",
-        type=int,
-        help="Only download files for specified year",
-    )
-    parser.add_argument(
-        "--priority-only",
+        "--deployment-only",
         action="store_true",
-        help="Only download driverless deployment reports from Aug 2023 onward",
+        help="Only download deployment program data (not pilot)",
+    )
+    parser.add_argument(
+        "--pilot-only",
+        action="store_true",
+        help="Only download pilot program data (not deployment)",
+    )
+    parser.add_argument(
+        "--min-year",
+        type=int,
+        default=None,
+        help="Only download data from this year onward",
     )
 
     args = parser.parse_args()
@@ -446,102 +385,96 @@ def main():
 
     # Create session and scrape links
     session = get_session()
-    links = scrape_download_links(session)
+    zip_links = scrape_zip_links(session)
 
-    if not links:
-        logger.error("No Excel files found on the CPUC page")
+    if not zip_links:
+        logger.error("No ZIP files found on the CPUC page")
         sys.exit(1)
 
     # Apply filters
-    filtered_links = links
-    if args.filter_company:
+    filtered_links = zip_links
+
+    if args.deployment_only:
         filtered_links = [
-            link
-            for link in filtered_links
-            if link["metadata"]["company"] == args.filter_company.lower()
+            link for link in filtered_links
+            if link["metadata"]["program_type"] == "deployment"
         ]
-        logger.info(
-            f"Filtered to {len(filtered_links)} files for company: {args.filter_company}"
-        )
+        logger.info(f"Filtered to {len(filtered_links)} deployment files")
 
-    if args.filter_year:
+    if args.pilot_only:
         filtered_links = [
-            link
-            for link in filtered_links
-            if link["metadata"]["year"] == args.filter_year
+            link for link in filtered_links
+            if link["metadata"]["program_type"] == "pilot"
         ]
-        logger.info(
-            f"Filtered to {len(filtered_links)} files for year: {args.filter_year}"
-        )
+        logger.info(f"Filtered to {len(filtered_links)} pilot files")
 
-    if args.priority_only:
-        # Priority: Driverless Deployment from August 2023 onward
-        priority_links = []
-        for link in filtered_links:
-            meta = link["metadata"]
-            if meta["permit_type"] == "driverless-deployment":
-                year = meta["year"]
-                quarter = meta["quarter"]
-                if year and quarter:
-                    # Aug 2023 is Q3 2023
-                    if year > 2023 or (year == 2023 and quarter >= 3):
-                        priority_links.append(link)
-        filtered_links = priority_links
-        logger.info(
-            f"Filtered to {len(filtered_links)} priority files "
-            "(driverless deployment, Aug 2023+)"
-        )
+    if args.min_year:
+        filtered_links = [
+            link for link in filtered_links
+            if link["metadata"]["year"] and link["metadata"]["year"] >= args.min_year
+        ]
+        logger.info(f"Filtered to {len(filtered_links)} files from {args.min_year}+")
 
-    # Download files
-    downloaded = 0
-    skipped = 0
+    # Download and extract files
+    total_zips = 0
+    total_extracted = 0
     failed = 0
 
     download_run = {
         "timestamp": datetime.now().isoformat(),
-        "files_found": len(links),
-        "files_filtered": len(filtered_links),
-        "files_downloaded": 0,
-        "files_skipped": 0,
-        "files_failed": 0,
+        "zips_found": len(zip_links),
+        "zips_filtered": len(filtered_links),
+        "zips_downloaded": 0,
+        "files_extracted": 0,
+        "failed": 0,
     }
 
     for link in filtered_links:
-        output_path = args.output_dir / link["standardized_filename"]
-
-        # Check if file already exists
-        if output_path.exists() and not args.force:
-            logger.info(f"Skipping (already exists): {link['standardized_filename']}")
-            skipped += 1
-            continue
-
         if args.dry_run:
             logger.info(f"Would download: {link['url']}")
-            logger.info(f"  -> {output_path}")
-            logger.info(f"  Metadata: {json.dumps(link['metadata'], indent=4)}")
+            logger.info(f"  Program: {link['metadata']['program_type']}")
+            logger.info(f"  Year: {link['metadata']['year']}, Q{link['metadata'].get('quarter', '?')}")
             continue
 
-        # Download the file
-        download_info = download_file(session, link["url"], output_path)
+        # Check if we already have files from this ZIP
+        zip_key = link["standardized_filename"]
+        if zip_key in metadata.get("zip_archives", {}) and not args.force:
+            logger.info(f"Skipping (already processed): {zip_key}")
+            continue
 
-        if download_info:
-            downloaded += 1
+        # Download and extract
+        extracted = download_and_extract_zip(
+            session,
+            link["url"],
+            args.output_dir,
+            link["standardized_filename"],
+            link["metadata"],
+        )
+
+        if extracted:
+            total_zips += 1
+            total_extracted += len(extracted)
+
             # Update metadata
-            metadata["files"][link["standardized_filename"]] = {
+            metadata["zip_archives"][zip_key] = {
                 **link,
-                "download_info": download_info,
+                "extracted_files": extracted,
+                "downloaded_at": datetime.now().isoformat(),
             }
+
+            for file_info in extracted:
+                metadata["files"][file_info["output_name"]] = file_info
         else:
             failed += 1
-            logger.error(f"Failed to download: {link['url']}")
+            logger.error(f"Failed to process: {link['url']}")
 
         # Be polite - add delay between downloads
         time.sleep(1)
 
     # Update download history
-    download_run["files_downloaded"] = downloaded
-    download_run["files_skipped"] = skipped
-    download_run["files_failed"] = failed
+    download_run["zips_downloaded"] = total_zips
+    download_run["files_extracted"] = total_extracted
+    download_run["failed"] = failed
     metadata["download_history"].append(download_run)
     metadata["last_updated"] = datetime.now().isoformat()
 
@@ -554,10 +487,10 @@ def main():
     logger.info("\n" + "=" * 50)
     logger.info("Download Summary")
     logger.info("=" * 50)
-    logger.info(f"Total files found: {len(links)}")
-    logger.info(f"Files after filtering: {len(filtered_links)}")
-    logger.info(f"Downloaded: {downloaded}")
-    logger.info(f"Skipped (existing): {skipped}")
+    logger.info(f"Total ZIP archives found: {len(zip_links)}")
+    logger.info(f"ZIP archives after filtering: {len(filtered_links)}")
+    logger.info(f"ZIP archives downloaded: {total_zips}")
+    logger.info(f"Excel files extracted: {total_extracted}")
     logger.info(f"Failed: {failed}")
 
     if failed > 0:
