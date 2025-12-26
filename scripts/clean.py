@@ -509,6 +509,101 @@ def clean_excel_file(
     return processing_info
 
 
+def clean_csv_file(
+    filepath: Path,
+    mappings: dict,
+    output_dir: Path,
+) -> Optional[dict]:
+    """
+    Clean a single CSV file and return processing info.
+
+    Args:
+        filepath: Path to CSV file
+        mappings: Column mappings dictionary
+        output_dir: Directory for cleaned output
+
+    Returns:
+        Processing info dictionary or None if failed
+    """
+    filename = filepath.name
+    logger.info(f"Processing: {filename}")
+
+    # Parse metadata from filename
+    metadata = parse_metadata_from_filename(filename)
+    logger.info(f"  Metadata: {metadata}")
+
+    processing_info = {
+        "source_file": filename,
+        "metadata": metadata,
+        "sheets_processed": [],
+        "errors": [],
+    }
+
+    try:
+        # Read CSV file
+        df = pd.read_csv(filepath, low_memory=False)
+
+        if df.empty:
+            logger.warning(f"  File is empty, skipping")
+            return processing_info
+
+        # Detect report type from filename
+        report_type = detect_report_type(df, filename)
+        if report_type is None:
+            report_type = "unknown"
+        logger.info(f"  Detected report type: {report_type}")
+
+        # Apply column mappings
+        df = apply_column_mappings(df, mappings, report_type)
+
+        # Handle REDACTED values
+        df, redaction_stats = handle_redacted_values(df)
+
+        # Standardize dates
+        df = standardize_dates(df)
+
+        # Standardize numeric values
+        df = standardize_numeric(df)
+
+        # Add source metadata
+        df = add_source_metadata(
+            df,
+            filename,
+            metadata["company"],
+            metadata["year"],
+            metadata["quarter"],
+        )
+
+        # Fix mixed types for parquet compatibility
+        df = fix_mixed_types(df)
+
+        # Save cleaned data
+        output_subdir = output_dir / "cleaned" / report_type
+        output_subdir.mkdir(parents=True, exist_ok=True)
+
+        output_filename = f"{Path(filename).stem}.parquet"
+        output_path = output_subdir / output_filename
+
+        df.to_parquet(output_path, index=False)
+        logger.info(f"  Saved to: {output_path}")
+
+        processing_info["sheets_processed"].append({
+            "sheet_name": "csv",
+            "report_type": report_type,
+            "rows": len(df),
+            "columns": list(df.columns),
+            "redaction_stats": redaction_stats,
+            "output_path": str(output_path),
+        })
+
+    except Exception as e:
+        error_msg = f"Error processing file: {e}"
+        logger.error(f"  {error_msg}")
+        processing_info["errors"].append(error_msg)
+
+    return processing_info
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Clean and standardize CPUC Autonomous Vehicle data"
@@ -547,12 +642,14 @@ def main():
     # Load column mappings
     mappings = load_column_mappings(args.mappings_file)
 
-    # Find all Excel files
+    # Find all data files (Excel and CSV)
     excel_files = list(args.input_dir.glob("*.xlsx")) + list(args.input_dir.glob("*.xls"))
-    logger.info(f"Found {len(excel_files)} Excel files")
+    csv_files = list(args.input_dir.glob("*.csv"))
+    all_files = excel_files + csv_files
+    logger.info(f"Found {len(excel_files)} Excel files and {len(csv_files)} CSV files")
 
-    if not excel_files:
-        logger.warning("No Excel files found in input directory")
+    if not all_files:
+        logger.warning("No data files found in input directory")
         return
 
     if args.inspect_only:
@@ -571,8 +668,19 @@ def main():
     success_count = 0
     error_count = 0
 
+    # Process Excel files
     for filepath in excel_files:
         result = clean_excel_file(filepath, mappings, args.output_dir)
+        if result:
+            processing_results.append(result)
+            if result["errors"]:
+                error_count += 1
+            else:
+                success_count += 1
+
+    # Process CSV files
+    for filepath in csv_files:
+        result = clean_csv_file(filepath, mappings, args.output_dir)
         if result:
             processing_results.append(result)
             if result["errors"]:
@@ -583,7 +691,7 @@ def main():
     # Save processing report
     report = {
         "processed_at": datetime.now().isoformat(),
-        "total_files": len(excel_files),
+        "total_files": len(all_files),
         "successful": success_count,
         "with_errors": error_count,
         "results": processing_results,
@@ -598,7 +706,9 @@ def main():
     logger.info("\n" + "=" * 50)
     logger.info("Cleaning Summary")
     logger.info("=" * 50)
-    logger.info(f"Total files processed: {len(excel_files)}")
+    logger.info(f"Total files processed: {len(all_files)}")
+    logger.info(f"  Excel files: {len(excel_files)}")
+    logger.info(f"  CSV files: {len(csv_files)}")
     logger.info(f"Successful: {success_count}")
     logger.info(f"With errors: {error_count}")
 

@@ -250,15 +250,19 @@ def download_and_extract_zip(
         # Open ZIP from memory
         zip_buffer = BytesIO(response.content)
         with zipfile.ZipFile(zip_buffer, 'r') as zf:
-            # List contents
+            # List contents - include Excel AND CSV files (newer data uses CSV)
             file_list = zf.namelist()
-            excel_files = [f for f in file_list if f.lower().endswith(('.xlsx', '.xls'))]
+            data_files = [
+                f for f in file_list
+                if f.lower().endswith(('.xlsx', '.xls', '.csv'))
+                and not f.endswith('/')  # Skip directories
+            ]
 
-            logger.info(f"  ZIP contains {len(excel_files)} Excel files")
+            logger.info(f"  ZIP contains {len(data_files)} data files (Excel/CSV)")
 
-            for excel_file in excel_files:
+            for data_file in data_files:
                 # Skip hidden files and temp files
-                basename = os.path.basename(excel_file)
+                basename = os.path.basename(data_file)
                 if basename.startswith('.') or basename.startswith('~'):
                     continue
 
@@ -284,7 +288,7 @@ def download_and_extract_zip(
                 output_path = output_dir / output_filename
 
                 # Extract file
-                with zf.open(excel_file) as src:
+                with zf.open(data_file) as src:
                     content = src.read()
                     with open(output_path, 'wb') as dst:
                         dst.write(content)
@@ -292,7 +296,7 @@ def download_and_extract_zip(
                 file_hash = hashlib.md5(content).hexdigest()
 
                 extracted_files.append({
-                    "original_name": excel_file,
+                    "original_name": data_file,
                     "output_name": output_filename,
                     "output_path": str(output_path),
                     "size_bytes": len(content),
