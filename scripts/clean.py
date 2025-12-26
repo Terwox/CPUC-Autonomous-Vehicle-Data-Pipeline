@@ -281,7 +281,7 @@ def fix_mixed_types(df: pd.DataFrame) -> pd.DataFrame:
     """
     Fix columns with mixed types that cause parquet conversion errors.
 
-    Converts object columns with mixed types to strings.
+    Aggressively converts object columns to ensure parquet compatibility.
 
     Args:
         df: DataFrame to process
@@ -291,12 +291,13 @@ def fix_mixed_types(df: pd.DataFrame) -> pd.DataFrame:
     """
     for col in df.columns:
         if df[col].dtype == object:
-            # Check if column has mixed types
-            types = df[col].dropna().apply(type).unique()
-            if len(types) > 1:
-                # Convert to string to ensure homogeneous type
-                df[col] = df[col].astype(str).replace('nan', np.nan).replace('None', np.nan)
-                logger.debug(f"Converted mixed-type column '{col}' to string")
+            # Convert ALL object columns to string to ensure parquet compatibility
+            # This handles mixed int/float/str issues
+            try:
+                df[col] = df[col].apply(lambda x: str(x) if pd.notna(x) and not isinstance(x, str) else x)
+            except Exception:
+                # If that fails, force everything to string
+                df[col] = df[col].astype(str).replace('nan', np.nan).replace('None', np.nan).replace('NaT', np.nan)
 
     return df
 
@@ -483,8 +484,16 @@ def clean_excel_file(
                 output_filename = f"{Path(filename).stem}{sheet_suffix}.parquet"
                 output_path = output_subdir / output_filename
 
-                df.to_parquet(output_path, index=False)
-                logger.info(f"    Saved to: {output_path}")
+                # Try parquet first, fall back to CSV if it fails
+                try:
+                    df.to_parquet(output_path, index=False)
+                    logger.info(f"    Saved to: {output_path}")
+                except Exception as parquet_err:
+                    logger.warning(f"    Parquet failed ({parquet_err}), saving as CSV")
+                    output_filename = f"{Path(filename).stem}{sheet_suffix}.csv"
+                    output_path = output_subdir / output_filename
+                    df.to_csv(output_path, index=False)
+                    logger.info(f"    Saved to: {output_path}")
 
                 processing_info["sheets_processed"].append({
                     "sheet_name": sheet_name,
@@ -584,8 +593,16 @@ def clean_csv_file(
         output_filename = f"{Path(filename).stem}.parquet"
         output_path = output_subdir / output_filename
 
-        df.to_parquet(output_path, index=False)
-        logger.info(f"  Saved to: {output_path}")
+        # Try parquet first, fall back to CSV if it fails
+        try:
+            df.to_parquet(output_path, index=False)
+            logger.info(f"  Saved to: {output_path}")
+        except Exception as parquet_err:
+            logger.warning(f"  Parquet failed ({parquet_err}), saving as CSV")
+            output_filename = f"{Path(filename).stem}.csv"
+            output_path = output_subdir / output_filename
+            df.to_csv(output_path, index=False)
+            logger.info(f"  Saved to: {output_path}")
 
         processing_info["sheets_processed"].append({
             "sheet_name": "csv",

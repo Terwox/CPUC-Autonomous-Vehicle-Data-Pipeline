@@ -86,7 +86,7 @@ CANONICAL_SCHEMAS = {
 
 def find_cleaned_files(input_dir: Path) -> dict[str, list[Path]]:
     """
-    Find all cleaned parquet files organized by report type.
+    Find all cleaned data files (parquet and CSV) organized by report type.
 
     Args:
         input_dir: Base directory containing cleaned subdirectories
@@ -103,10 +103,11 @@ def find_cleaned_files(input_dir: Path) -> dict[str, list[Path]]:
     for subdir in cleaned_dir.iterdir():
         if subdir.is_dir():
             report_type = subdir.name
-            parquet_files = list(subdir.glob("*.parquet"))
-            if parquet_files:
-                files_by_type[report_type] = parquet_files
-                logger.info(f"Found {len(parquet_files)} files for {report_type}")
+            # Find both parquet and CSV files
+            data_files = list(subdir.glob("*.parquet")) + list(subdir.glob("*.csv"))
+            if data_files:
+                files_by_type[report_type] = data_files
+                logger.info(f"Found {len(data_files)} files for {report_type}")
 
     return files_by_type
 
@@ -140,7 +141,7 @@ def merge_report_type(
     Merge all files of a given report type into a single DataFrame.
 
     Args:
-        files: List of parquet file paths
+        files: List of data file paths (parquet or CSV)
         report_type: Type of report
         canonical_schema: Expected schema for this report type
 
@@ -155,7 +156,14 @@ def merge_report_type(
     dfs = []
     for filepath in files:
         try:
-            df = pd.read_parquet(filepath)
+            # Read based on file extension
+            if filepath.suffix.lower() == '.parquet':
+                df = pd.read_parquet(filepath)
+            elif filepath.suffix.lower() == '.csv':
+                df = pd.read_csv(filepath, low_memory=False)
+            else:
+                logger.warning(f"  Skipping unknown file type: {filepath}")
+                continue
             df = align_schema(df, canonical_schema)
             dfs.append(df)
             logger.debug(f"  Loaded: {filepath.name} ({len(df)} rows)")
