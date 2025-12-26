@@ -277,6 +277,30 @@ def standardize_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def fix_mixed_types(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fix columns with mixed types that cause parquet conversion errors.
+
+    Converts object columns with mixed types to strings.
+
+    Args:
+        df: DataFrame to process
+
+    Returns:
+        DataFrame with fixed types
+    """
+    for col in df.columns:
+        if df[col].dtype == object:
+            # Check if column has mixed types
+            types = df[col].dropna().apply(type).unique()
+            if len(types) > 1:
+                # Convert to string to ensure homogeneous type
+                df[col] = df[col].astype(str).replace('nan', np.nan).replace('None', np.nan)
+                logger.debug(f"Converted mixed-type column '{col}' to string")
+
+    return df
+
+
 def add_source_metadata(
     df: pd.DataFrame,
     filename: str,
@@ -446,6 +470,9 @@ def clean_excel_file(
                     metadata["year"],
                     metadata["quarter"],
                 )
+
+                # Fix mixed types for parquet compatibility
+                df = fix_mixed_types(df)
 
                 # Save cleaned data
                 output_subdir = output_dir / "cleaned" / report_type

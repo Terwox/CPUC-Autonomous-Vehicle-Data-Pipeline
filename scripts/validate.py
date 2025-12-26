@@ -450,7 +450,7 @@ def generate_validation_report(results: list[ValidationResult], output_path: Pat
     ])
 
     for result in results:
-        status = "✅ PASS" if result.passed is True else "❌ FAIL" if result.passed is False else "⚠️ WARNING"
+        status = "[PASS]" if result.passed is True else "[FAIL]" if result.passed is False else "[WARN]"
         lines.extend([
             f"### {result.name}",
             "",
@@ -470,7 +470,7 @@ def generate_validation_report(results: list[ValidationResult], output_path: Pat
 
     # Write report
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
     logger.info(f"Validation report saved to: {output_path}")
