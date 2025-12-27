@@ -220,11 +220,18 @@ def standardize_dates(df: pd.DataFrame) -> pd.DataFrame:
     """
     date_patterns = ["date", "time", "day", "month", "year", "period"]
 
+    # Columns that should NOT be converted to datetime even if they match patterns
+    exclude_patterns = ["vmt", "miles", "trip", "total_", "p0", "p1", "p2", "p3", "fare", "count"]
+
     for col in df.columns:
         col_lower = col.lower()
 
         # Skip flag columns
         if col.endswith("_redacted"):
+            continue
+
+        # Skip numeric columns that happen to have date-like words (e.g., vmtperiod1, total_trips)
+        if any(exclude in col_lower for exclude in exclude_patterns):
             continue
 
         if any(pattern in col_lower for pattern in date_patterns):
@@ -437,6 +444,12 @@ def clean_excel_file(
         for sheet_name in xl.sheet_names:
             logger.info(f"  Processing sheet: {sheet_name}")
 
+            # Skip template sheets by name
+            sheet_lower = sheet_name.lower()
+            if any(pattern in sheet_lower for pattern in ["template", "data dictionary", "instructions", "readme"]):
+                logger.warning(f"    Sheet '{sheet_name}' is a template sheet, skipping")
+                continue
+
             try:
                 # Read the sheet
                 df = xl.parse(sheet_name)
@@ -444,6 +457,28 @@ def clean_excel_file(
                 if df.empty:
                     logger.warning(f"    Sheet '{sheet_name}' is empty, skipping")
                     continue
+
+                # Check if this is template/example data by content
+                first_col_str = str(df.iloc[0, 0]) if len(df) > 0 else ""
+                if any(phrase in first_col_str.lower() for phrase in [
+                    "california public utilities commission",
+                    "cpuc ordered",
+                    "quarterly_data_reporting_templates",
+                    "data dictionary"
+                ]):
+                    logger.warning(f"    Sheet '{sheet_name}' appears to be a template/data dictionary by content, skipping")
+                    continue
+
+                # Check for example data patterns (1970 dates, placeholder values)
+                if len(df) > 0:
+                    date_cols = df.select_dtypes(include=['datetime64']).columns
+                    for col in date_cols:
+                        if df[col].notna().any():
+                            # Check if dates are in 1970 (typical placeholder)
+                            sample_dates = df[col].dropna().head()
+                            if any(pd.to_datetime(d).year == 1970 for d in sample_dates):
+                                logger.warning(f"    Sheet '{sheet_name}' contains 1970 placeholder dates, skipping")
+                                continue
 
                 # Detect report type
                 report_type = detect_report_type(df, filename)
@@ -621,6 +656,34 @@ def clean_csv_file(
     return processing_info
 
 
+def should_skip_file(filename: str) -> bool:
+    """
+    Check if a file should be skipped (templates, references, etc.).
+
+    Args:
+        filename: Name of the file to check
+
+    Returns:
+        True if file should be skipped, False otherwise
+    """
+    filename_lower = filename.lower()
+
+    # Skip template and reference files
+    skip_patterns = [
+        "template",
+        "reference",
+        "narrative",
+        "data_dictionary",
+        "data dictionary",
+        "quarterly_data_reporting_templates",
+        "attachment",
+        "reference-key",
+        "narratives_and_reference",
+    ]
+
+    return any(pattern in filename_lower for pattern in skip_patterns)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Clean and standardize CPUC Autonomous Vehicle data"
@@ -660,10 +723,19 @@ def main():
     mappings = load_column_mappings(args.mappings_file)
 
     # Find all data files (Excel and CSV)
-    excel_files = list(args.input_dir.glob("*.xlsx")) + list(args.input_dir.glob("*.xls"))
-    csv_files = list(args.input_dir.glob("*.csv"))
+    all_excel_files = list(args.input_dir.glob("*.xlsx")) + list(args.input_dir.glob("*.xls"))
+    all_csv_files = list(args.input_dir.glob("*.csv"))
+
+    # Filter out template/reference files
+    excel_files = [f for f in all_excel_files if not should_skip_file(f.name)]
+    csv_files = [f for f in all_csv_files if not should_skip_file(f.name)]
+
+    skipped_count = (len(all_excel_files) - len(excel_files)) + (len(all_csv_files) - len(csv_files))
+
     all_files = excel_files + csv_files
     logger.info(f"Found {len(excel_files)} Excel files and {len(csv_files)} CSV files")
+    if skipped_count > 0:
+        logger.info(f"Skipped {skipped_count} template/reference files")
 
     if not all_files:
         logger.warning("No data files found in input directory")

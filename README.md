@@ -19,10 +19,10 @@ cd cpuc-av-data
 pip install -r requirements.txt
 
 # Run the pipeline
-python scripts/download.py    # Fetch raw files from CPUC
-python scripts/clean.py       # Standardize schemas, handle REDACTED
-python scripts/merge.py       # Combine quarters into unified tables
-python scripts/validate.py    # Run data quality checks
+python scripts/1_download.py    # Fetch raw files from CPUC
+python scripts/2_clean.py       # Standardize schemas, handle REDACTED
+python scripts/3_merge.py       # Combine quarters into unified tables
+python scripts/4_validate.py    # Run data quality checks
 ```
 
 ## Output Files
@@ -62,10 +62,10 @@ cpuc-av-data/
 │   ├── DATA_DICTIONARY.md        # Variable descriptions
 │   └── VALIDATION_REPORT.md      # Data quality check results
 ├── scripts/
-│   ├── download.py               # Fetch raw files from CPUC
-│   ├── clean.py                  # Standardize schemas, handle REDACTED
-│   ├── merge.py                  # Combine quarters into unified tables
-│   ├── validate.py               # Data quality checks
+│   ├── 1_download.py             # Fetch raw files from CPUC
+│   ├── 2_clean.py                # Standardize schemas, handle REDACTED
+│   ├── 3_merge.py                # Combine quarters into unified tables
+│   ├── 4_validate.py             # Data quality checks
 │   └── column_mappings.json      # Schema reconciliation mappings
 ├── notebooks/
 │   └── exploratory.ipynb         # Basic EDA, sanity checks
